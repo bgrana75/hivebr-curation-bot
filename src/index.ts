@@ -1,10 +1,11 @@
 import { config } from 'dotenv';
 import { Client as DiscordClient, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } from 'discord.js';
-import { Client as HiveClient } from '@hiveio/dhive';
+import { Client as HiveClient, VoteOperation } from '@hiveio/dhive';
 import { hiveEngineApi } from './hive_engine';
 import * as fs from 'fs';
 import { promisify } from 'util';
 import axios from 'axios';
+import { vote } from './hive/index';
 const readFile = promisify(fs.readFile);
 const writeFile = promisify(fs.writeFile);
 
@@ -13,7 +14,6 @@ config(); // Load .env variables
 const USERS_FILE = './users.json';
 const BLACKLIST_FILE = './blacklist.json';
 const STAFF_FILE = './staff.json';
-const TRAIL_FILE = './trail.json';
 
 const HIVE_NODES = [
   'https://api.hive.blog',
@@ -28,7 +28,10 @@ let currentNode: HiveClient;
 
 let stream: any;
 
-const getStaffUsers = async (): Promise<string[]> => {
+// Global variable to store the active channel
+let activeChannel: any = null;
+
+const getStaffUsers = async (): Promise<{ hiveUsername: string; discordId: string }[]> => {
   try {
     const data = await readFile(STAFF_FILE, 'utf-8');
     return JSON.parse(data);
@@ -38,29 +41,11 @@ const getStaffUsers = async (): Promise<string[]> => {
   }
 };
 
-const saveStaffUsers = async (users: string[]): Promise<void> => {
+const saveStaffUsers = async (users: { hiveUsername: string; discordId: string }[]): Promise<void> => {
   try {
     await writeFile(STAFF_FILE, JSON.stringify(users, null, 2));
   } catch (error) {
     console.error(`Could not write users to ${STAFF_FILE}:`, (error as Error).message);
-  }
-};
-
-const getTrailUsers = async (): Promise<string[]> => {
-  try {
-    const data = await readFile(TRAIL_FILE, 'utf-8');
-    return JSON.parse(data);
-  } catch (error) {
-    console.error(`Could not read users from ${TRAIL_FILE}:`, (error as Error).message);
-    return [];
-  }
-};
-
-const saveTrailUsers = async (users: string[]): Promise<void> => {
-  try {
-    await writeFile(TRAIL_FILE, JSON.stringify(users, null, 2));
-  } catch (error) {
-    console.error(`Could not write users to ${TRAIL_FILE}:`, (error as Error).message);
   }
 };
 
@@ -208,6 +193,48 @@ async function getAuthorDelegationRank(author: string): Promise<number | null> {
   }
 }
 
+async function checkSameDayVote(
+  author: string,
+  permlink: string,
+  referenceDate: Date
+): Promise<boolean> {
+  const hiveClient = getHiveClient();
+
+  try {
+    const posts = await hiveClient.database.call('get_discussions_by_author_before_date', [
+      author,
+      permlink,
+      '',
+      10
+    ]);
+
+    for (const post of posts) {
+      // Skip the original post in question
+      if (post.permlink === permlink) continue;
+
+      const postDate = new Date(post.created);
+
+      const sameDay =
+        postDate.getUTCFullYear() === referenceDate.getUTCFullYear() &&
+        postDate.getUTCMonth() === referenceDate.getUTCMonth() &&
+        postDate.getUTCDate() === referenceDate.getUTCDate();
+
+      if (sameDay) {
+        const hasVote = post.active_votes.some((vote: any) => vote.voter === 'hive-br.voter');
+        if (hasVote) return true;
+      } else if (postDate < referenceDate) {
+        // Posts are ordered, no need to continue if date is earlier
+        break;
+      }
+    }
+
+    return false;
+  } catch (error) {
+    console.error(`Error checking same-day vote for @${author}:`, error);
+    return false;
+  }
+}
+
 async function getUserInfo(author: string): Promise<{
   hive: number;
   hbd: number;
@@ -269,42 +296,128 @@ async function getPostInfo(author: string, permlink: string): Promise<{
   parentAuthor: string;
   parentPermlink: string;
   created: string;
+  lastUpdate: string;
   beneficiaries: any[];
   activeVotes: any[];
   isDeclining: number;
 } | null> {
   const hiveClient = getHiveClient();
-  try {
-    const content = await hiveClient.database.call('get_content', [author, permlink]);
-    const { category, title, body, parent_author, parent_permlink, created, active_votes, beneficiaries, max_accepted_payout } = content;
+  const maxRetries = 3;
+  const retryDelay = 2000; // 2 seconds
 
-    const maxAcceptedPayoutValue = extractNumber(max_accepted_payout);
-    const isDeclining = maxAcceptedPayoutValue > 0 ? 0 : 1;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const content = await hiveClient.database.call('get_content', [author, permlink]);
+      const { category, title, body, parent_author, parent_permlink, created, lastUpdate, active_votes, beneficiaries, max_accepted_payout } = content;
 
-    return {
-      category,
-      title,
-      body,
-      parentAuthor: parent_author,
-      parentPermlink: parent_permlink,
-      created,
-      beneficiaries,
-      activeVotes: active_votes,
-      isDeclining
-    };
-  } catch (error) {
-    console.error(`Error fetching post @${author}/${permlink}:`, error);
-    return null;
+      const maxAcceptedPayoutValue = extractNumber(max_accepted_payout);
+      const isDeclining = maxAcceptedPayoutValue > 0 ? 0 : 1;
+
+      return {
+        category,
+        title,
+        body,
+        parentAuthor: parent_author,
+        parentPermlink: parent_permlink,
+        created,
+        lastUpdate,
+        beneficiaries,
+        activeVotes: active_votes,
+        isDeclining
+      };
+    } catch (error) {
+      console.error(`Attempt ${attempt} failed to fetch post @${author}/${permlink}:`, error);
+
+      if (attempt < maxRetries) {
+        console.log(`Retrying in ${retryDelay / 1000} seconds...`);
+        await new Promise(resolve => setTimeout(resolve, retryDelay));
+      } else {
+        console.error(`Failed to fetch post @${author}/${permlink} after ${maxRetries} attempts.`);
+        return null;
+      }
+    }
   }
+
+  return null;
 }
 
-const processPost = async (post: any) => {
-  const { author, permlink } = post;
+// Function to check Hivewatchers blacklist
+const checkHivewatchers = async (): Promise<string[]> => {
+  try {
+    const response = await axios.get('https://spaminator.me/api/bl/all.json');
+    if (response.data && Array.isArray(response.data.result)) {
+      return response.data.result;
+    }
+    console.error('Unexpected response format from Hivewatchers API.');
+    return [];
+  } catch (error) {
+    console.error('Hivewatchers API is offline or unreachable:', (error as Error).message);
+    return []; // Ignore if the API is offline
+  }
+};
+
+// Modify processPost to use the API for trail list check
+const processPost = async (post: any, timestamp: string) => {
+  const { author, permlink, json_metadata } = post;
+  const postLnk = `https://peakd.com/@${author}/${permlink}`;
+
+  // Parse json_metadata to check for the "hivebrphotocontest" tag
+  try {
+    const metadata = JSON.parse(json_metadata);
+    if (Array.isArray(metadata.tags) && metadata.tags.includes('hivebrphotocontest')) {
+      console.error(`Skipping post by @${author} because it is tagged with "hivebrphotocontest".`);
+      if (activeChannel) {
+        await activeChannel.send(`Skipping post <${postLnk}> by @${author}: Post is tagged with "hivebrphotocontest".`);
+      }
+      return;
+    }
+  } catch (error) {
+    console.error('Error parsing json_metadata:', error);
+  }
+
   const postInfo = await getPostInfo(author, permlink);
   if (!postInfo) {
     console.error(`Failed to fetch post info for @${author}/${permlink}`);
+    if (activeChannel) {
+      await activeChannel.send(`Skipping post <${postLnk}> by @${author}: Failed to fetch post info.`);
+    }
     return;
   }
+
+  // Check if the user is on the blacklist or Hivewatchers list
+  const blacklistedUsers = await getBlacklistedUsers();
+  const hivewatchersList = await checkHivewatchers();
+  if (blacklistedUsers.includes(author) || hivewatchersList.includes(author)) {
+    console.error(`Skipping post by blacklisted user @${author}`);
+    if (activeChannel) {
+      await activeChannel.send(`Skipping post <${postLnk}> by @${author}: User is blacklisted.`);
+    }
+    return;
+  }
+
+  // Check if the author was already voted on the same day
+  const referenceDate = new Date(timestamp);
+  const alreadyVoted = await checkSameDayVote(author, permlink, referenceDate);
+  if (alreadyVoted) {
+    console.error(`Skipping post by @${author} because they were already voted on the same day.`);
+    if (activeChannel) {
+      await activeChannel.send(`Skipping post <${postLnk}> by @${author}: Already voted on the same day.`);
+    }
+    return;
+  }
+
+  const postCreatedTime = new Date(postInfo.created).getTime();
+  const providedTimestamp = new Date(timestamp).getTime();
+  console.log(`Post created time: ${postCreatedTime}, Provided timestamp: ${providedTimestamp}`);
+  // Allow up to 5 seconds difference
+  if (providedTimestamp < postCreatedTime || providedTimestamp > postCreatedTime + 5000) {
+    console.error(`Post @${author}/${permlink} was created outside the allowed timestamp range. Skipping.`);
+    // if (activeChannel) {
+    //   await activeChannel.send(`Skipping post <${postLnk}> by @${author}: This is a post edit, not a new post.`);
+    // }
+    return;
+  }
+
   const { category, title, body, beneficiaries, isDeclining } = postInfo;
   const userInfo = await getUserInfo(author);
   const postLink = `https://peakd.com/@${author}/${permlink}`;
@@ -398,13 +511,17 @@ const processPost = async (post: any) => {
       }
     }
 
-    // Check if the user is in the traillist
-    const trailUsers = await getTrailUsers();
+    // Check if the user is on the trail list using the API
     let trailPoints = 0;
-    const isInTrailList = trailUsers.includes(author);
-    if (isInTrailList) {
-      trailPoints = 5; // Add 5 points if the user is in the traillist
-      voteValue += trailPoints;
+    try {
+      const response = await axios.get(`https://hive.vote/api.php?i=1&user=hive-br.voter`);
+      const trailUsers = response.data.map((user: any) => user.follower); // Use "follower" field
+      if (trailUsers.includes(author)) {
+        trailPoints = 5; // Add 5 points if the user is on the trail list
+        voteValue += trailPoints;
+      }
+    } catch (error) {
+      console.error(`Error checking trail list for @${author}:`, error);
     }
 
     // Check if the user is in the stafflist
@@ -418,6 +535,10 @@ const processPost = async (post: any) => {
 
     // Ensure total points do not exceed 100
     voteValue = Math.min(voteValue, 100);
+
+    if (author === 'hive-br') {
+      voteValue = 100;
+    }
 
     // Extract the first image from the body (Markdown text)
     let thumbnailUrl: string | null = null;
@@ -457,14 +578,14 @@ const processPost = async (post: any) => {
       { name: '**Verified User:**', value: `${isVerified ? 'Yes' : 'No'} (+${verifiedPoints}%)`, inline: false },
       { name: '**Posted in HiveBR:**', value: `${postedInHiveBR ? 'Yes' : 'No'} (+${hiveBRPoints}%)`, inline: false },
       { name: '**Hive-BR Beneficiary:**', value: `${hiveBrBeneficiary ? 'Yes' : 'No'} (+${hiveBrBeneficiaryPoints}%)`, inline: false },
-      { name: '**In Trail List:**', value: `${isInTrailList ? 'Yes' : 'No'} (+${trailPoints}%)`, inline: false },
+      { name: '**In Trail List:**', value: `${trailPoints > 0 ? 'Yes' : 'No'} (+${trailPoints}%)`, inline: false },
       { name: '**In Staff List:**', value: `${isInStaffList ? 'Yes' : 'No'} (+${staffPoints}%)`, inline: false },
       { name: '**Total Vote:**', value: `${voteValue}%`, inline: false }
     );
 
     // Create buttons
     const voteButton = new ButtonBuilder()
-      .setCustomId(permlink)
+      .setCustomId(`${author}/${permlink}/${voteValue}`) // Include voteValue in customId
       .setLabel(' 🚀 VOTE! ')
       .setStyle(ButtonStyle.Primary);
   
@@ -481,7 +602,7 @@ const processPost = async (post: any) => {
   return null;
 };
 
-async function processBlock(block: any, message: any): Promise<void> {
+async function processBlock(block: any): Promise<void> {
   let blockNum = 0;
 
   for (const transaction of block.transactions) {
@@ -493,14 +614,14 @@ async function processBlock(block: any, message: any): Promise<void> {
 
       try {
         const metadata = JSON.parse(json_metadata);
-        if (Array.isArray(metadata.tags) && metadata.tags.includes('hivebr')) {
+        if (Array.isArray(metadata.tags) && (metadata.tags.includes('hivebr') || metadata.tags.includes('hive-br'))) {
           const blacklistedUsers = await getBlacklistedUsers();
           if (!blacklistedUsers.includes(author)) {
-            const result = await processPost(postData);
+            const result = await processPost(postData, block.timestamp);
 
-            if (result) {
+            if (result && activeChannel) {
               const { embed, buttons } = result;
-              await message.channel.send({ embeds: [embed], components: [buttons] });
+              await activeChannel.send({ embeds: [embed], components: [buttons] });
             }
           } else {
             console.log(`Author @${author} is blacklisted. Skipping post.`);
@@ -512,11 +633,12 @@ async function processBlock(block: any, message: any): Promise<void> {
     }
   }
 
-  console.log(`Block ${blockNum} processed.`);
+  //console.log(`Block ${blockNum} processed.`);
   await updateLastProcessedBlock(process.env.BLOCK_FILE || '', blockNum);
 }
 
-const streamBlockchain = async (message: any) => {
+const streamBlockchain = async (retryCount = 0) => {
+  const MAX_RETRIES = HIVE_NODES.length;
   const lastProcessedBlock = await getLastProcessedBlock(process.env.BLOCK_FILE || '');
   let hiveClient = getNextHiveClient();
 
@@ -524,17 +646,29 @@ const streamBlockchain = async (message: any) => {
     stream.removeAllListeners();
   }
 
-  if (lastProcessedBlock) {
-    console.log(`Resuming from block ${lastProcessedBlock + 1}`);
-    stream = hiveClient.blockchain.getBlockStream({ from: lastProcessedBlock + 1 });
-  } else {
-    console.log('Starting from the latest block');
-    stream = hiveClient.blockchain.getBlockStream();
+  try {
+    if (lastProcessedBlock) {
+      console.log(`Resuming from block ${lastProcessedBlock + 1}`);
+      stream = hiveClient.blockchain.getBlockStream({ from: lastProcessedBlock + 1 });
+    } else {
+      console.log('Starting from the latest block');
+      stream = hiveClient.blockchain.getBlockStream();
+    }
+  } catch (error) {
+    console.error(`Failed to start block stream: ${(error as Error).message}`);
+    if (retryCount < MAX_RETRIES) {
+      console.log('Trying next Hive node...');
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      return streamBlockchain(retryCount + 1); // try next node
+    } else {
+      console.error('All Hive nodes failed. Exiting...');
+      process.exit(1); // or handle differently
+    }
   }
 
   stream.on('data', async (block: any) => {
     try {
-      await processBlock(block, message);
+      await processBlock(block);
     } catch (error) {
       console.error('Error processing block:', error);
     }
@@ -544,15 +678,16 @@ const streamBlockchain = async (message: any) => {
     console.error('Error in block stream:', error);
     console.log('Attempting to restart the stream in 5 seconds...');
     await new Promise(resolve => setTimeout(resolve, 5000));
-    await streamBlockchain(message);
+    await streamBlockchain();
   });
 
   stream.on('end', async () => {
     console.log('Stream ended unexpectedly. Attempting to restart...');
     await new Promise(resolve => setTimeout(resolve, 5000));
-    await streamBlockchain(message);
+    await streamBlockchain();
   });
 };
+
 
 const discordClient = new DiscordClient({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
@@ -564,6 +699,52 @@ discordClient.once('ready', async () => {
 });
 
 discordClient.on('messageCreate', async (message) => {
+  if (message.content === '!help') {
+    const helpMessage = `
+\`\`\`
+Available Commands:
+
+1. !start
+   - Starts the blockchain stream and begins monitoring posts.
+
+2. !stop
+   - Stops the blockchain stream.
+
+3. !verify <username>
+   - Adds a user to the verified list.
+
+4. !unverify <username>
+   - Removes a user from the verified list.
+
+5. !verified
+   - Lists all verified users.
+
+6. !ban <username>
+   - Adds a user to the blacklist.
+
+7. !unban <username>
+   - Removes a user from the blacklist.
+
+8. !blacklist
+    - Lists all blacklisted users.
+
+9. !staff <username> <discordmention>
+    - Adds a user to the staff list.
+
+10. !unstaff <username>
+    - Removes a user from the staff list.
+
+11. !stafflist
+    - Lists all users in the staff list.
+
+12. !userinfo <username>
+   - Displays detailed information about a user's Hive account.
+
+\`\`\`
+    `;
+    message.channel.send(helpMessage);
+  }
+
   if (message.content.startsWith('!verify ')) {
     const userToAdd = message.content.split(' ')[1];
     if (userToAdd) {
@@ -751,12 +932,14 @@ discordClient.on('messageCreate', async (message) => {
       message.channel.send('```\nNo users are currently blacklisted.\n```');
     }
   } else if (message.content === '!start') {
+    activeChannel = message.channel; // Store the channel globally
     message.channel.send('```\nStarting blockchain stream...\n```');
-    await streamBlockchain(message);
+    await streamBlockchain();
   } else if (message.content === '!stop') {
     if (stream) {
       stream.removeAllListeners();
       stream = null;
+      activeChannel = null; // Clear the active channel
       message.channel.send('```\nBlockchain stream stopped.\n```');
     } else {
       message.channel.send('```\nNo active blockchain stream to stop.\n```');
@@ -765,85 +948,109 @@ discordClient.on('messageCreate', async (message) => {
 
   // Staff commands
   if (message.content.startsWith('!staff ')) {
-    const userToAdd = message.content.split(' ')[1];
-    if (userToAdd) {
+    const args = message.content.split(' ');
+    const hiveUsername = args[1];
+    const discordMention = args[2];
+
+    if (hiveUsername && discordMention) {
+      // Extract Discord ID from mention
+      const discordId = discordMention.match(/^<@!?(\d+)>$/)?.[1];
+      if (!discordId) {
+        message.channel.send('```\nInvalid Discord mention. Please use the format: !staff <hiveusername> <@discorduser>\n```');
+        return;
+      }
+
       const staffUsers = await getStaffUsers();
-      if (!staffUsers.includes(userToAdd)) {
-        staffUsers.push(userToAdd);
+      const existingEntry = staffUsers.find(user => user.hiveUsername === hiveUsername);
+
+      if (!existingEntry) {
+        staffUsers.push({ hiveUsername, discordId });
         await saveStaffUsers(staffUsers);
-        message.channel.send(`\`\`\`User @${userToAdd} added to staff list.\`\`\``);
+        message.channel.send(`\`\`\`User @${hiveUsername} (Discord ID: ${discordMention}) added to staff list.\`\`\``);
       } else {
-        message.channel.send(`\`\`\`User @${userToAdd} is already in the staff list.\`\`\``);
+        message.channel.send(`\`\`\`User @${hiveUsername} is already in the staff list.\`\`\``);
       }
     } else {
-      message.channel.send('```\nPlease specify a user to add to the staff list.\n```');
+      message.channel.send('```\nPlease specify both a Hive username and a Discord mention. Usage: !staff <hiveusername> <@discorduser>\n```');
     }
   } else if (message.content.startsWith('!unstaff ')) {
-    const userToRemove = message.content.split(' ')[1];
-    if (userToRemove) {
+    const hiveUsername = message.content.split(' ')[1];
+    if (hiveUsername) {
       let staffUsers = await getStaffUsers();
-      if (staffUsers.includes(userToRemove)) {
-        staffUsers = staffUsers.filter(user => user !== userToRemove);
+      if (staffUsers.some(user => user.hiveUsername === hiveUsername)) {
+        staffUsers = staffUsers.filter(user => user.hiveUsername !== hiveUsername);
         await saveStaffUsers(staffUsers);
-        message.channel.send(`\`\`\`User @${userToRemove} removed from staff list.\`\`\``);
+        message.channel.send(`\`\`\`User @${hiveUsername} removed from staff list.\`\`\``);
       } else {
-        message.channel.send(`\`\`\`User @${userToRemove} is not in the staff list.\`\`\``);
+        message.channel.send(`\`\`\`User @${hiveUsername} is not in the staff list.\`\`\``);
       }
     } else {
-      message.channel.send('```\nPlease specify a user to remove from the staff list.\n```');
+      message.channel.send('```\nPlease specify a Hive username to remove from the staff list.\n```');
     }
   } else if (message.content === '!stafflist') {
     const staffUsers = await getStaffUsers();
     if (staffUsers.length > 0) {
-      const userList = staffUsers.sort().map(user => `- @${user}`).join('\n');
+      const userList = staffUsers
+        .sort((a, b) => a.hiveUsername.localeCompare(b.hiveUsername))
+        .map(user => `- ${user.hiveUsername} - <@${user.discordId}>`)
+        .join('\n');
       message.channel.send(`\`\`\`**Staff Users:**\n${userList}\`\`\``);
     } else {
       message.channel.send('```\nNo users are currently in the staff list.\n```');
-    }
-  }
-
-  // Trail commands
-  else if (message.content.startsWith('!trail ')) {
-    const userToAdd = message.content.split(' ')[1];
-    if (userToAdd) {
-      const trailUsers = await getTrailUsers();
-      if (!trailUsers.includes(userToAdd)) {
-        trailUsers.push(userToAdd);
-        await saveTrailUsers(trailUsers);
-        message.channel.send(`\`\`\`User @${userToAdd} added to trail list.\`\`\``);
-      } else {
-        message.channel.send(`\`\`\`User @${userToAdd} is already in the trail list.\`\`\``);
-      }
-    } else {
-      message.channel.send('```\nPlease specify a user to add to the trail list.\n```');
-    }
-  } else if (message.content.startsWith('!untrail ')) {
-    const userToRemove = message.content.split(' ')[1];
-    if (userToRemove) {
-      let trailUsers = await getTrailUsers();
-      if (trailUsers.includes(userToRemove)) {
-        trailUsers = trailUsers.filter(user => user !== userToRemove);
-        await saveTrailUsers(trailUsers);
-        message.channel.send(`\`\`\`User @${userToRemove} removed from trail list.\`\`\``);
-      } else {
-        message.channel.send(`\`\`\`User @${userToRemove} is not in the trail list.\`\`\``);
-      }
-    } else {
-      message.channel.send('```\nPlease specify a user to remove from the trail list.\n```');
-    }
-  } else if (message.content === '!traillist') {
-    const trailUsers = await getTrailUsers();
-    if (trailUsers.length > 0) {
-      const userList = trailUsers.sort().map(user => `- @${user}`).join('\n');
-      message.channel.send(`\`\`\`**Trail Users:**\n${userList}\`\`\``);
-    } else {
-      message.channel.send('```\nNo users are currently in the trail list.\n```');
     }
   } else if (message.content.startsWith('!test ')) {
     //const author = message.content.split(' ')[1];
     //const ranking = await getAuthorDelegationRank(author);
     //message.reply(ranking ? `User @${author} is ranked #${ranking} among delegators.` : `User @${author} is not ranked.`);
     message.channel.send('```\nThis is a Test.\n```');
+  }
+});
+
+discordClient.on('interactionCreate', async (interaction) => {
+  if (!interaction.isButton()) return;
+
+  const { customId } = interaction;
+
+  if (customId) {
+    try {
+      const [author, permlink, voteValue] = customId.split('/');
+      const privateKey = process.env.HIVE_PRIVATE_KEY; // Ensure this is set in your .env file
+      const voter = process.env.HIVE_ACCOUNT; // Ensure this is set in your .env file
+
+      if (!privateKey || !voter) {
+        console.error('HIVE_PRIVATE_KEY or HIVE_ACCOUNT is not set in the environment variables.');
+        await interaction.reply({ content: 'Voting is not configured properly. Please contact the administrator.', flags: 64 });
+        return;
+      }
+
+      // Correctly construct the VoteOperation object
+      const voteOperation: VoteOperation = [
+        'vote',
+        {
+          voter,
+          author,
+          permlink,
+          weight: Math.round(Number(voteValue) * 100), // Convert voteValue to weight (e.g., 100% = 10000)
+        },
+      ];
+
+      const hiveClient = getHiveClient();
+      await vote(privateKey, voteOperation, hiveClient);
+
+      // Create a disabled button labeled "Voted!" with a valid custom_id
+      const votedButton = new ButtonBuilder()
+        .setCustomId('voted_button') // Set a valid custom_id
+        .setLabel('Voted!')
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(true);
+
+      const actionRow = new ActionRowBuilder<ButtonBuilder>().addComponents(votedButton);
+
+      await interaction.update({ components: [actionRow] }); // Update the message with the disabled button
+    } catch (error) {
+      console.error('Error processing vote button interaction:', error);
+      await interaction.reply({ content: 'Failed to cast the vote. Please try again later.', flags: 64 });
+    }
   }
 });
 
