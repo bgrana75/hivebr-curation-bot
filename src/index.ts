@@ -1,147 +1,42 @@
 import { config } from 'dotenv';
-import { Client as DiscordClient, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } from 'discord.js';
-import { Client as HiveClient, VoteOperation } from '@hiveio/dhive';
+import { Client as DiscordClient, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, TextChannel, Channel } from 'discord.js';
+import { getNextHiveClient, getHiveClient } from './hive/index';
+import { convertVestToHive, extractNumber } from './hive/util';
+import { getBlacklistedUsers, getVerifiedUsers, saveVerifiedUsers, getStaffUsers, getLastProcessedBlock, updateLastProcessedBlock, saveBlacklistedUsers, saveStaffUsers, isUserInStaffList } from './users';
+import { checkHivewatchers, checkHiveVoteTrail } from './services/api';
+import { getAuthorDelegationRank } from './hive/haf';
 import { hiveEngineApi } from './hive_engine';
-import * as fs from 'fs';
-import { promisify } from 'util';
-import axios from 'axios';
-import { vote } from './hive/index';
-const readFile = promisify(fs.readFile);
-const writeFile = promisify(fs.writeFile);
+import { vote, comment } from './hive/index';
 
 config(); // Load .env variables
-
-const USERS_FILE = './users.json';
-const BLACKLIST_FILE = './blacklist.json';
-const STAFF_FILE = './staff.json';
-
-const HIVE_NODES = [
-  'https://api.hive.blog',
-  'https://api.openhive.network',
-  'https://api.deathwing.me',
-  'https://hive-api.arcange.eu',
-  'https://anyx.io',
-  'https://techcoderx.com'
-];
-let currentNodeIndex = 0;
-let currentNode: HiveClient;
 
 let stream: any;
 
 // Global variable to store the active channel
-let activeChannel: any = null;
+let activeChannel: TextChannel | null = null;
 
-const getStaffUsers = async (): Promise<{ hiveUsername: string; discordId: string }[]> => {
-  try {
-    const data = await readFile(STAFF_FILE, 'utf-8');
-    return JSON.parse(data);
-  } catch (error) {
-    console.error(`Could not read users from ${STAFF_FILE}:`, (error as Error).message);
-    return [];
+async function getActiveChannel(channelId?: string) {
+  if (channelId) {
+    try {
+      let channel: Channel | null = discordClient.channels.cache.get(channelId) || null;
+
+      if (!channel) {
+        channel = await discordClient.channels.fetch(channelId);
+      }
+
+      if (channel?.isTextBased()) {
+        return channel as TextChannel;
+      }
+
+      console.warn(`Channel ${channelId} is not text-based or not found.`);
+      return activeChannel;
+    } catch (error) {
+      console.error(`Error fetching channel ${channelId}:`, error);
+      return activeChannel;
+    }
+
   }
-};
-
-const saveStaffUsers = async (users: { hiveUsername: string; discordId: string }[]): Promise<void> => {
-  try {
-    await writeFile(STAFF_FILE, JSON.stringify(users, null, 2));
-  } catch (error) {
-    console.error(`Could not write users to ${STAFF_FILE}:`, (error as Error).message);
-  }
-};
-
-// Rename getUsersToMonitor to getVerifiedUsers
-const getVerifiedUsers = async (): Promise<string[]> => {
-  try {
-    const data = await readFile(USERS_FILE, 'utf-8');
-    return JSON.parse(data);
-  } catch (error) {
-    console.error(`Could not read users from ${USERS_FILE}:`, (error as Error).message);
-    return [];
-  }
-};
-
-// Rename saveUsersToMonitor to saveVerifiedUsers
-const saveVerifiedUsers = async (users: string[]): Promise<void> => {
-  try {
-    await writeFile(USERS_FILE, JSON.stringify(users, null, 2));
-  } catch (error) {
-    console.error(`Could not write users to ${USERS_FILE}:`, (error as Error).message);
-  }
-};
-
-const getBlacklistedUsers = async (): Promise<string[]> => {
-  try {
-    const data = await readFile(BLACKLIST_FILE, 'utf-8');
-    return JSON.parse(data);
-  } catch (error) {
-    console.error(`Could not read users from ${BLACKLIST_FILE}:`, (error as Error).message);
-    return [];
-  }
-};
-
-const saveBlacklistedUsers = async (users: string[]): Promise<void> => {
-  try {
-    await writeFile(BLACKLIST_FILE, JSON.stringify(users, null, 2));
-  } catch (error) {
-    console.error(`Could not write users to ${BLACKLIST_FILE}:`, (error as Error).message);
-  }
-};
-
-const getLastProcessedBlock = async (filePath: string): Promise<number> => {
-  try {
-    const data = await readFile(filePath, 'utf-8');
-    return parseInt(data, 10) || 0;
-  } catch (error) {
-    console.error(`Could not read last processed block from ${filePath}:`, (error as Error).message);
-    return 0;
-  }
-};
-
-const updateLastProcessedBlock = async (filePath: string, blockNumber: number): Promise<void> => {
-  try {
-    await writeFile(filePath, blockNumber.toString());
-  } catch (error) {
-    console.error(`Could not write last processed block to ${filePath}:`, (error as Error).message);
-  }
-};
-
-const getNextHiveClient = () => {
-  currentNodeIndex = (currentNodeIndex + 1) % HIVE_NODES.length;
-  console.log(`Switching to Hive node: ${HIVE_NODES[currentNodeIndex]}`);
-  currentNode = new HiveClient(HIVE_NODES[currentNodeIndex]);
-  return currentNode;
-};
-
-const getHiveClient = () => {
-  if (!currentNode) {
-    return getNextHiveClient();
-  }
-  return currentNode;
-}
-
-async function convertVestToHive (amount: number) {
-  const hiveClient = getHiveClient();
-  const globalProperties = await hiveClient.call('condenser_api', 'get_dynamic_global_properties', []);
-  const totalVestingFund = extractNumber(globalProperties.total_vesting_fund_hive)
-  const totalVestingShares = extractNumber(globalProperties.total_vesting_shares)
-  const vestHive = ( totalVestingFund * amount ) / totalVestingShares
-  return vestHive
-}
-
-function extractNumber(value: string): number {
-
-  const match = value.match(/([\d.]+)/);
-  return match ? parseFloat(match[0]) : 0;
-}
-
-function hasHiveBrTag(jsonMetadata: string): boolean {
-  try {
-    const metadata = JSON.parse(jsonMetadata);
-    return Array.isArray(metadata.tags) && metadata.tags.includes('hivebr');
-  } catch (error) {
-    console.error('Error parsing json_metadata:', error);
-    return false;
-  }
+  return activeChannel;
 }
 
 async function getHiveBrVoterDelegation(author: string): Promise<number | null> {
@@ -158,37 +53,6 @@ async function getHiveBrVoterDelegation(author: string): Promise<number | null> 
     }
   } catch (error) {
     console.error(`Error fetching delegations for @${author}:`, error);
-    return null;
-  }
-}
-
-type IncomingDelegation = {
-  delegator: string;
-  delegatee: string;
-  vests: string; // e.g., "178701.319083"
-  hp_equivalent: string; // e.g., "106.457"
-  timestamp: string; // ISO string
-};
-
-async function getAuthorDelegationRank(author: string): Promise<number | null> {
-  const communityAccount = 'hive-br.voter';
-  const url = `https://hafsql-api.mahdiyari.info/delegations/${communityAccount}/incoming`;
-
-  try {
-    const response = await axios.get<IncomingDelegation[]>(url);
-    const delegations = response.data;
-    const rankedDelegators = delegations
-      .map((d) => ({
-        delegator: d.delegator,
-        amount: parseFloat(d.vests),
-      }))
-      .sort((a, b) => b.amount - a.amount);
-
-    const authorRank = rankedDelegators.findIndex((d) => d.delegator === author);
-
-    return authorRank !== -1 ? authorRank + 1 : null;
-  } catch (error) {
-    console.error(`Error fetching delegation rank for @${author}:`, error);
     return null;
   }
 }
@@ -341,21 +205,6 @@ async function getPostInfo(author: string, permlink: string): Promise<{
   return null;
 }
 
-// Function to check Hivewatchers blacklist
-const checkHivewatchers = async (): Promise<string[]> => {
-  try {
-    const response = await axios.get('https://spaminator.me/api/bl/all.json');
-    if (response.data && Array.isArray(response.data.result)) {
-      return response.data.result;
-    }
-    console.error('Unexpected response format from Hivewatchers API.');
-    return [];
-  } catch (error) {
-    console.error('Hivewatchers API is offline or unreachable:', (error as Error).message);
-    return []; // Ignore if the API is offline
-  }
-};
-
 // Modify processPost to use the API for trail list check
 const processPost = async (post: any, timestamp: string) => {
   const { author, permlink, json_metadata } = post;
@@ -366,8 +215,9 @@ const processPost = async (post: any, timestamp: string) => {
     const metadata = JSON.parse(json_metadata);
     if (Array.isArray(metadata.tags) && metadata.tags.includes('hivebrphotocontest')) {
       console.error(`Skipping post by @${author} because it is tagged with "hivebrphotocontest".`);
-      if (activeChannel) {
-        await activeChannel.send(`Skipping post <${postLnk}> by @${author}: Post is tagged with "hivebrphotocontest".`);
+      const channel = await getActiveChannel();
+      if (channel) {
+        await channel.send(`Skipping post <${postLnk}> by @${author}: Post is tagged with "hivebrphotocontest".`);
       }
       return;
     }
@@ -378,8 +228,9 @@ const processPost = async (post: any, timestamp: string) => {
   const postInfo = await getPostInfo(author, permlink);
   if (!postInfo) {
     console.error(`Failed to fetch post info for @${author}/${permlink}`);
-    if (activeChannel) {
-      await activeChannel.send(`Skipping post <${postLnk}> by @${author}: Failed to fetch post info.`);
+    const channel = await getActiveChannel();
+    if (channel) {
+      await channel.send(`Skipping post <${postLnk}> by @${author}: Failed to fetch post info.`);
     }
     return;
   }
@@ -389,8 +240,9 @@ const processPost = async (post: any, timestamp: string) => {
   const hivewatchersList = await checkHivewatchers();
   if (blacklistedUsers.includes(author) || hivewatchersList.includes(author)) {
     console.error(`Skipping post by blacklisted user @${author}`);
-    if (activeChannel) {
-      await activeChannel.send(`Skipping post <${postLnk}> by @${author}: User is blacklisted.`);
+    const channel = await getActiveChannel();
+    if (channel) {
+      await channel.send(`Skipping post <${postLnk}> by @${author}: User is blacklisted.`);
     }
     return;
   }
@@ -400,8 +252,9 @@ const processPost = async (post: any, timestamp: string) => {
   const alreadyVoted = await checkSameDayVote(author, permlink, referenceDate);
   if (alreadyVoted) {
     console.error(`Skipping post by @${author} because they were already voted on the same day.`);
-    if (activeChannel) {
-      await activeChannel.send(`Skipping post <${postLnk}> by @${author}: Already voted on the same day.`);
+    const channel = await getActiveChannel();
+    if (channel) {
+      await channel.send(`Skipping post <${postLnk}> by @${author}: Already voted on the same day.`);
     }
     return;
   }
@@ -513,15 +366,10 @@ const processPost = async (post: any, timestamp: string) => {
 
     // Check if the user is on the trail list using the API
     let trailPoints = 0;
-    try {
-      const response = await axios.get(`https://hive.vote/api.php?i=1&user=hive-br.voter`);
-      const trailUsers = response.data.map((user: any) => user.follower); // Use "follower" field
-      if (trailUsers.includes(author)) {
-        trailPoints = 5; // Add 5 points if the user is on the trail list
-        voteValue += trailPoints;
-      }
-    } catch (error) {
-      console.error(`Error checking trail list for @${author}:`, error);
+    const isOnTrail = await checkHiveVoteTrail(author);
+    if (isOnTrail) {
+      trailPoints = 5; // Add 5 points if the user is on the trail list
+      voteValue += trailPoints;
     }
 
     // Check if the user is in the stafflist
@@ -596,7 +444,10 @@ const processPost = async (post: any, timestamp: string) => {
     
     const buttons = new ActionRowBuilder<ButtonBuilder>().addComponents(voteButton, viewPostButton);
 
-    return { embed, buttons };
+    const channel = await getActiveChannel();
+    if (channel) {
+      await channel.send({ embeds: [embed], components: [buttons] });
+    }
   }
 
   return null;
@@ -619,10 +470,10 @@ async function processBlock(block: any): Promise<void> {
           if (!blacklistedUsers.includes(author)) {
             const result = await processPost(postData, block.timestamp);
 
-            if (result && activeChannel) {
-              const { embed, buttons } = result;
-              await activeChannel.send({ embeds: [embed], components: [buttons] });
-            }
+            // if (result && activeChannel) {
+            //   const { embed, buttons } = result;
+            //   await activeChannel.send({ embeds: [embed], components: [buttons] });
+            // }
           } else {
             console.log(`Author @${author} is blacklisted. Skipping post.`);
           }
@@ -638,7 +489,7 @@ async function processBlock(block: any): Promise<void> {
 }
 
 const streamBlockchain = async (retryCount = 0) => {
-  const MAX_RETRIES = HIVE_NODES.length;
+  const MAX_RETRIES = 5;
   const lastProcessedBlock = await getLastProcessedBlock(process.env.BLOCK_FILE || '');
   let hiveClient = getNextHiveClient();
 
@@ -654,6 +505,10 @@ const streamBlockchain = async (retryCount = 0) => {
       console.log('Starting from the latest block');
       stream = hiveClient.blockchain.getBlockStream();
     }
+
+    // Reset retryCount after successful reconnection
+    retryCount = 0;
+
   } catch (error) {
     console.error(`Failed to start block stream: ${(error as Error).message}`);
     if (retryCount < MAX_RETRIES) {
@@ -688,7 +543,6 @@ const streamBlockchain = async (retryCount = 0) => {
   });
 };
 
-
 const discordClient = new DiscordClient({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
 });
@@ -699,6 +553,56 @@ discordClient.once('ready', async () => {
 });
 
 discordClient.on('messageCreate', async (message) => {
+  if (message.author.bot) return; // Ignore bot messages
+
+  // Allow everyone to use !userinfo
+  if (message.content.startsWith('!userinfo ')) {
+    // ...existing code for !userinfo...
+    const userToGet = message.content.split(' ')[1];
+    if (userToGet) {
+      let totalVote = 0;
+      const userInfo = await getUserInfo(userToGet);
+      
+      if (userInfo) {
+        const percentageDelegated = (userInfo.delegatedVestingShares / userInfo.vestingShares) * 100;
+  
+        const keColor = userInfo.ke < 1.5 ? '🟢' : userInfo.ke < 3 ? '🟡' : '🔴';
+        const pdColor = userInfo.isPD ? '🔴' : '🟢';
+        const percentageDelegatedColor = percentageDelegated < 30 ? '🟢' : percentageDelegated < 60 ? '🟡' : '🔴';
+  
+        const embed = {
+          color: 0x0099ff, // Blue color
+          title: `User Info for @${userToGet}`,
+          thumbnail: { url: `https://images.hive.blog/u/${userToGet}/avatar` },
+          fields: [
+            { name: 'HP', value: `${userInfo.hp.toFixed(3)}`, inline: false },
+            { name: 'KE', value: `${userInfo.ke.toFixed(3)} ${keColor}`, inline: false },
+            { name: 'Power Down', value: `${userInfo.isPD ? 'Yes' : 'No'} ${pdColor}`, inline: false },
+            { name: 'Percentage Delegated', value: `${percentageDelegated.toFixed(2)}% ${percentageDelegatedColor}`, inline: false },
+            { name: 'Hive-BR Delegation', value: userInfo.hiveBrVoterDelegation ? `${userInfo.hiveBrVoterDelegation.toFixed(3)}` : 'N/A', inline: false },
+            { name: 'HBR Stake', value: userInfo.hbrInfo ? userInfo.hbrInfo.stake.toString() : 'N/A', inline: false },
+          ],
+          footer: { text: `Requested by ${message.author.displayName}`, icon_url: message.author.displayAvatarURL() }
+        };
+  
+        message.channel.send({ embeds: [embed] }); // Sends the message normally in the channel
+      } else {
+        message.channel.send(`No account data found for @${userToGet}`);
+      }
+    } else {
+      message.channel.send('Please specify a user to get info.');
+    }
+    return;
+  }
+
+  // Check if the user is in the staff list for all other commands
+  const isStaff = await isUserInStaffList(message.author.id);
+  if (!isStaff) {
+    message.channel.send('```\nYou do not have permission to use this command.\n```');
+    return;
+  }
+
+  // Process other commands
   if (message.content === '!help') {
     const helpMessage = `
 \`\`\`
@@ -743,9 +647,7 @@ Available Commands:
 \`\`\`
     `;
     message.channel.send(helpMessage);
-  }
-
-  if (message.content.startsWith('!verify ')) {
+  } else if (message.content.startsWith('!verify ')) {
     const userToAdd = message.content.split(' ')[1];
     if (userToAdd) {
       const blacklistedUsers = await getBlacklistedUsers();
@@ -786,110 +688,6 @@ Available Commands:
     } else {
       message.channel.send('```\nNo users are currently verified.\n```');
     }
-  } else if (message.content.startsWith('!userinfo ')) {
-    const userToGet = message.content.split(' ')[1];
-    if (userToGet) {
-      let totalVote = 0;
-      const userInfo = await getUserInfo(userToGet);
-      
-      if (userInfo) {
-        const percentageDelegated = (userInfo.delegatedVestingShares / userInfo.vestingShares) * 100;
-  
-        const keColor = userInfo.ke < 1.5 ? '🟢' : userInfo.ke < 3 ? '🟡' : '🔴';
-        const pdColor = userInfo.isPD ? '🔴' : '🟢';
-        const percentageDelegatedColor = percentageDelegated < 30 ? '🟢' : percentageDelegated < 60 ? '🟡' : '🔴';
-  
-        const embed = {
-          color: 0x0099ff, // Blue color
-          title: `User Info for @${userToGet}`,
-          thumbnail: { url: `https://images.hive.blog/u/${userToGet}/avatar` },
-          fields: [
-            { name: 'HP', value: `${userInfo.hp.toFixed(3)}`, inline: false },
-            { name: 'KE', value: `${userInfo.ke.toFixed(3)} ${keColor}`, inline: false },
-            { name: 'Power Down', value: `${userInfo.isPD ? 'Yes' : 'No'} ${pdColor}`, inline: false },
-            { name: 'Percentage Delegated', value: `${percentageDelegated.toFixed(2)}% ${percentageDelegatedColor}`, inline: false },
-            { name: 'Hive-BR Delegation', value: userInfo.hiveBrVoterDelegation ? `${userInfo.hiveBrVoterDelegation.toFixed(3)}` : 'N/A', inline: false },
-            { name: 'HBR Stake', value: userInfo.hbrInfo ? userInfo.hbrInfo.stake.toString() : 'N/A', inline: false },
-          ],
-          footer: { text: `Requested by ${message.author.displayName}`, icon_url: message.author.displayAvatarURL() }
-        };
-  
-        message.channel.send({ embeds: [embed] }); // Sends the message normally in the channel
-      } else {
-        message.channel.send(`No account data found for @${userToGet}`);
-      }
-    } else {
-      message.channel.send('Please specify a user to get info.');
-    }
-  } else if (message.content.startsWith('!checkpost ')) {
-    const input = message.content.split(' ')[1];
-    if (input) {
-        const [author, permlink] = input.replace('@', '').split('/');
-        if (author && permlink) {
-            const postInfo = await getPostInfo(author, permlink);
-            if (postInfo) {
-                const userInfo = await getUserInfo(author);
-                if (userInfo) {
-                  const { category, title, body, beneficiaries, isDeclining } = postInfo;
-                  const wordCount = body.split(/\s+/).length;
-                  const imageCount = (body.match(/!\[.*?\]\(.*?\)/g) || []).length;
-                  const postLink = `https://peakd.com/@${author}/${permlink}`;
-    
-                  // Embed with user and post sections
-                  const embed = new EmbedBuilder()
-                      .setColor(0x0099ff) // Blue color
-                      .setAuthor({ name: `@${author}`, iconURL: `https://images.hive.blog/u/${author}/avatar`, url: `https://peakd.com/@${author}` }) // Post author
-                      .setTitle(`**${title}**`) // Post title
-                      .setURL(postLink) // Clickable post link
-                      .addFields(
-                          // Post info section
-                          { name: '**Post Info:**', value: ``, inline:  true },
-                          { name: ``, value: ``, inline:  false },
-                          { name: "**Category**", value: category, inline: true },
-                          { name: "**Declining Rewards**", value: isDeclining ? "Yes" : "No", inline: true },
-                          { name: "", value: ``, inline:  false },
-                          { name: "**Word Count**", value: `${wordCount}`, inline:  true },
-                          { name: "**Image Count**", value: `${imageCount}`, inline: true },
-
-                          { name: "**Beneficiaries**", value: `\`\`\`json\n${JSON.stringify(beneficiaries, null, 2)}\n\`\`\``, inline: false },
-
-                          // User info section
-                          { name: '**Author Info:**', value: ``, inline: false },
-                          { name: `**HP:**`, value: `${userInfo.hp.toFixed(3)}`, inline: true },
-                          { name: `**KE:**`, value: `${userInfo.ke.toFixed(3)}`, inline: true },
-                          { name: ``, value: ``, inline:  false },
-                          { name: `**Power Down:**`, value: `${userInfo.isPD ? 'Yes' : 'No'}`, inline: true },
-                          { name: `**Hive-BR Delegation:**`, value: `${userInfo.hiveBrVoterDelegation ? userInfo.hiveBrVoterDelegation.toFixed(3) : 'N/A'}`, inline: true },
-                          { name: ``, value: ``, inline:  false },
-                          { name: `**HBR Stake:**`, value: `${userInfo.hbrInfo ? userInfo.hbrInfo.stake.toString() : 'N/A'}`, inline: true }
-                      )
-                      //.setFooter({ text: `Requested by ${message.author.displayName}`, iconURL: message.author.displayAvatarURL() });
-    
-                  // Buttons for actions
-                  const buttons = new ActionRowBuilder<ButtonBuilder>()
-                      .addComponents(
-                          new ButtonBuilder()
-                              .setCustomId(permlink)
-                              .setLabel(' 🚀 VOTE! ')
-                              .setStyle(ButtonStyle.Primary),
-                          new ButtonBuilder()
-                              .setLabel('View Post')
-                              .setStyle(ButtonStyle.Link)
-                              .setURL(postLink)
-                      );
-    
-                  message.channel.send({ embeds: [embed], components: [buttons] });
-                };
-            } else {
-                message.channel.send(`No post found for **@${author}/${permlink}**`);
-            }
-        } else {
-            message.channel.send('Invalid format. Usage: `!checkpost @<author>/<permlink>`');
-        }
-    } else {
-        message.channel.send('Please specify an author and permlink. Usage: `!checkpost @<author>/<permlink>`');
-    }
-
   } else if (message.content.startsWith('!ban ')) {
     const userToBan = message.content.split(' ')[1];
     if (userToBan) {
@@ -932,7 +730,11 @@ Available Commands:
       message.channel.send('```\nNo users are currently blacklisted.\n```');
     }
   } else if (message.content === '!start') {
-    activeChannel = message.channel; // Store the channel globally
+    if (message.channel.isTextBased() && message.channel instanceof TextChannel) {
+        activeChannel = message.channel; // Store the channel globally
+    } else {
+        console.warn('The channel is not a TextChannel. Cannot set as activeChannel.');
+    }
     message.channel.send('```\nStarting blockchain stream...\n```');
     await streamBlockchain();
   } else if (message.content === '!stop') {
@@ -1009,7 +811,14 @@ Available Commands:
 discordClient.on('interactionCreate', async (interaction) => {
   if (!interaction.isButton()) return;
 
-  const { customId } = interaction;
+  const { customId, user } = interaction;
+
+  // Check if the user is in the staff list
+  const isStaff = await isUserInStaffList(user.id);
+  if (!isStaff) {
+    await interaction.reply({ content: 'You do not have permission to perform this action.', ephemeral: true });
+    return;
+  }
 
   if (customId) {
     try {
@@ -1023,30 +832,38 @@ discordClient.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      // Correctly construct the VoteOperation object
-      const voteOperation: VoteOperation = [
-        'vote',
-        {
-          voter,
-          author,
-          permlink,
-          weight: Math.round(Number(voteValue) * 100), // Convert voteValue to weight (e.g., 100% = 10000)
-        },
-      ];
-
       const hiveClient = getHiveClient();
-      await vote(privateKey, voteOperation, hiveClient);
+      try {
+        await vote(privateKey, voter, author, permlink, voteValue);
 
-      // Create a disabled button labeled "Voted!" with a valid custom_id
-      const votedButton = new ButtonBuilder()
-        .setCustomId('voted_button') // Set a valid custom_id
-        .setLabel('Voted!')
-        .setStyle(ButtonStyle.Secondary)
-        .setDisabled(true);
+        // Generate a random unique string for the permlink
+        // const randomPermlink = `comment-${Math.random().toString(36).substring(2, 15)}`;
 
-      const actionRow = new ActionRowBuilder<ButtonBuilder>().addComponents(votedButton);
+        // // Add a comment to the post
+        // await comment(
+        //   privateKey,
+        //   voter, // voter becomes the author of the comment
+        //   randomPermlink,
+        //   author, // parent_author
+        //   permlink, // parent_permlink
+        //   '', // title
+        //   '', // body
+        // );
 
-      await interaction.update({ components: [actionRow] }); // Update the message with the disabled button
+        // If the vote is successful, update the button to "Voted!"
+        const votedButton = new ButtonBuilder()
+          .setCustomId('voted_button') // Set a valid custom_id
+          .setLabel('Voted!')
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(true);
+
+        const actionRow = new ActionRowBuilder<ButtonBuilder>().addComponents(votedButton);
+
+        await interaction.update({ components: [actionRow] }); // Update the message with the disabled button
+      } catch (error) {
+        console.error('Error broadcasting vote operation or adding comment:', error);
+        await interaction.reply({ content: 'Failed to cast the vote or add a comment. Please try again later.', flags: 64 });
+      }
     } catch (error) {
       console.error('Error processing vote button interaction:', error);
       await interaction.reply({ content: 'Failed to cast the vote. Please try again later.', flags: 64 });

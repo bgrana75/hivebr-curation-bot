@@ -1,10 +1,38 @@
 import { Client, CommentOperation, CommentOptionsOperation, Operation, PrivateKey, VoteOperation } from '@hiveio/dhive';
-import { title } from 'process';
+import { get } from 'http';
+
+const HIVE_NODES = [
+    'https://api.hive.blog',
+    'https://api.openhive.network',
+    'https://api.deathwing.me',
+    'https://hive-api.arcange.eu',
+    'https://anyx.io',
+    'https://techcoderx.com'
+];
+
+let currentNodeIndex = 0;
+let currentNode: Client;
+
+export const getNextHiveClient = () => {
+  currentNodeIndex = (currentNodeIndex + 1) % HIVE_NODES.length;
+  console.log(`Switching to Hive node: ${HIVE_NODES[currentNodeIndex]}`);
+  currentNode = new Client(HIVE_NODES[currentNodeIndex]);
+  return currentNode;
+};
+
+export const getHiveClient = () => {
+  if (!currentNode) {
+    return getNextHiveClient();
+  }
+  return currentNode;
+};
 
 export async function vote(
   privateKey: string,
-  vote: VoteOperation,
-  client: Client
+  voter: string,
+  author: string,
+  permlink: string,
+  voteValue: string,
 ): Promise<void> {
   try {
     //console.log("Broadcasting vote operation:", vote);
@@ -16,7 +44,17 @@ export async function vote(
     //       weight: 3000
     //     }]
     //   ], PrivateKey.fromString(privateKey));
-    await client.broadcast.sendOperations([vote], PrivateKey.fromString(privateKey));
+    const client = getHiveClient();
+    const voteOperation: VoteOperation = [
+        'vote',
+        {
+          voter,
+          author,
+          permlink,
+          weight: Math.round(Number(voteValue) * 100), // Convert voteValue to weight (e.g., 100% = 10000)
+        },
+      ];
+    await client.broadcast.sendOperations([voteOperation], PrivateKey.fromString(privateKey));
     console.log("Vote operation successfully broadcasted");
   } catch (error) {
     console.error("Error broadcasting vote operation:", error);
@@ -32,8 +70,8 @@ export async function comment(
     parent_permlink: string,
     title: string,
     body: string,
-    client: Client
   ) {
+    const client = getHiveClient();
     const commentOptions: CommentOptionsOperation = [
         "comment_options",
         {
@@ -49,7 +87,7 @@ export async function comment(
                     {
                         beneficiaries: [
                             // {
-                            //     account: "skatehacker",
+                            //     account: "hiveusername",
                             //     weight: 1000,
                             // },
                         ],
@@ -68,9 +106,9 @@ export async function comment(
             title: title,
             body: body,
             json_metadata: JSON.stringify({
-                // tags: ["skateboard"],
-                // app: "Skatehive App",
-                // image: "/SKATE_HIVE_VECTOR_FIN.svg",
+                // tags: ["tag"],
+                // app: "appname",
+                // image: "/image.svg",
             }),
         },
     ];
