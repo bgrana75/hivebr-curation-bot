@@ -76,7 +76,7 @@ async function checkSameDayVote(
       // Skip the original post in question
       if (post.permlink === permlink) continue;
 
-      const postDate = new Date(post.created);
+      const postDate = new Date(post.created + 'Z');
 
       const sameDay =
         postDate.getUTCFullYear() === referenceDate.getUTCFullYear() &&
@@ -85,7 +85,10 @@ async function checkSameDayVote(
 
       if (sameDay) {
         const hasVote = post.active_votes.some((vote: any) => vote.voter === 'hive-br.voter');
-        if (hasVote) return true;
+        if (hasVote) {
+          console.log(postDate, " ", referenceDate);
+          return true;
+        }
       } else if (postDate < referenceDate) {
         // Posts are ordered, no need to continue if date is earlier
         break;
@@ -205,6 +208,52 @@ async function getPostInfo(author: string, permlink: string): Promise<{
   return null;
 }
 
+async function castVoteAndComment(
+  author: string,
+  permlink: string,
+  voteValue: string
+): Promise<void> {
+  const hiveClient = getHiveClient();
+  const privateKey = process.env.HIVE_PRIVATE_KEY; // Ensure this is set in your .env file
+  const voter = process.env.HIVE_ACCOUNT; // Ensure this is set in your .env file
+
+  if (!privateKey || !voter) {
+    throw new Error('HIVE_PRIVATE_KEY or HIVE_ACCOUNT is not configured in the environment variables.');
+  }
+
+  // Cast the vote
+  await vote(privateKey, voter, author, permlink, voteValue);
+
+  // Generate a random unique string for the permlink
+  const randomPermlink = `hivebr-${Math.random().toString(36).substring(2, 15)}`;
+
+  const body = `
+<center> 
+![banner_hiver_br_01.png](https://images.ecency.com/DQmcTb42obRrjKQYdtH2ZXjyQb1pn7HNgFgMpTeC6QKtPu4/banner_hiver_br_01.png)
+
+Delegate your HP to the [hive-br.voter](https://ecency.com/@hive-br.voter/wallet) account and earn Hive daily!
+
+| | | | | |
+|----|----|----|----|----|
+|<center>[50 HP](https://hivesigner.com/sign/delegateVestingShares?&delegatee=hive-br.voter&vesting_shares=50%20HP)</center>|<center>[100 HP](https://hivesigner.com/sign/delegateVestingShares?&delegatee=hive-br.voter&vesting_shares=100%20HP)</center>|<center>[200 HP](https://hivesigner.com/sign/delegateVestingShares?&delegatee=hive-br.voter&vesting_shares=200%20HP)</center>|<center>[500 HP](https://hivesigner.com/sign/delegateVestingShares?&delegatee=hive-br.voter&vesting_shares=500%20HP)</center>|<center>[1000 HP](https://hivesigner.com/sign/delegateVestingShares?&delegatee=hive-br.voter&vesting_shares=1000%20HP)</center>|
+
+🔹 Follow our [Curation Trail](https://hive.vote/dash.php?i=1&trail=hive-br.voter) and don't miss voting! 🔹
+</center>
+`;
+
+
+  // Add a comment to the post
+   await comment(
+     privateKey,
+     voter, // voter becomes the author of the comment
+     randomPermlink,
+     author, // parent_author
+     permlink, // parent_permlink
+     'comment', // title
+     body, // body
+   );
+}
+
 // Modify processPost to use the API for trail list check
 const processPost = async (post: any, timestamp: string) => {
   const { author, permlink, json_metadata } = post;
@@ -235,6 +284,18 @@ const processPost = async (post: any, timestamp: string) => {
     return;
   }
 
+  const postCreatedTime = new Date(postInfo.created).getTime();
+  const providedTimestamp = new Date(timestamp).getTime();
+  console.log(`Post created time: ${postCreatedTime}, Provided timestamp: ${providedTimestamp}`);
+  // Allow up to 5 seconds difference
+  if (providedTimestamp < postCreatedTime || providedTimestamp > postCreatedTime + 5000) {
+    console.error(`Post @${author}/${permlink} was created outside the allowed timestamp range. Skipping.`);
+    // if (activeChannel) {
+    //   await activeChannel.send(`Skipping post <${postLnk}> by @${author}: This is a post edit, not a new post.`);
+    // }
+    return;
+  }
+
   // Check if the user is on the blacklist or Hivewatchers list
   const blacklistedUsers = await getBlacklistedUsers();
   const hivewatchersList = await checkHivewatchers();
@@ -248,7 +309,7 @@ const processPost = async (post: any, timestamp: string) => {
   }
 
   // Check if the author was already voted on the same day
-  const referenceDate = new Date(timestamp);
+  const referenceDate = new Date(timestamp + 'Z');
   const alreadyVoted = await checkSameDayVote(author, permlink, referenceDate);
   if (alreadyVoted) {
     console.error(`Skipping post by @${author} because they were already voted on the same day.`);
@@ -256,18 +317,6 @@ const processPost = async (post: any, timestamp: string) => {
     if (channel) {
       await channel.send(`Skipping post <${postLnk}> by @${author}: Already voted on the same day.`);
     }
-    return;
-  }
-
-  const postCreatedTime = new Date(postInfo.created).getTime();
-  const providedTimestamp = new Date(timestamp).getTime();
-  console.log(`Post created time: ${postCreatedTime}, Provided timestamp: ${providedTimestamp}`);
-  // Allow up to 5 seconds difference
-  if (providedTimestamp < postCreatedTime || providedTimestamp > postCreatedTime + 5000) {
-    console.error(`Post @${author}/${permlink} was created outside the allowed timestamp range. Skipping.`);
-    // if (activeChannel) {
-    //   await activeChannel.send(`Skipping post <${postLnk}> by @${author}: This is a post edit, not a new post.`);
-    // }
     return;
   }
 
@@ -375,7 +424,7 @@ const processPost = async (post: any, timestamp: string) => {
     // Check if the user is in the stafflist
     const staffUsers = await getStaffUsers();
     let staffPoints = 0;
-    const isInStaffList = staffUsers.includes(author);
+    const isInStaffList = staffUsers.some(user => user.hiveUsername === author);
     if (isInStaffList) {
       staffPoints = 10; // Add 10 points if the user is in the stafflist
       voteValue += staffPoints;
@@ -431,23 +480,40 @@ const processPost = async (post: any, timestamp: string) => {
       { name: '**Total Vote:**', value: `${voteValue}%`, inline: false }
     );
 
-    // Create buttons
-    const voteButton = new ButtonBuilder()
-      .setCustomId(`${author}/${permlink}/${voteValue}`) // Include voteValue in customId
-      .setLabel(' 🚀 VOTE! ')
-      .setStyle(ButtonStyle.Primary);
-  
-    const viewPostButton = new ButtonBuilder()
-      .setLabel('View Post')
-      .setStyle(ButtonStyle.Link)
-      .setURL(postLink);
-    
-    const buttons = new ActionRowBuilder<ButtonBuilder>().addComponents(voteButton, viewPostButton);
-
     const channel = await getActiveChannel();
-    if (channel) {
-      await channel.send({ embeds: [embed], components: [buttons] });
+
+    if (isVerified) {
+      try {
+        await castVoteAndComment(author, permlink, String(voteValue));
+
+        const votedButton = new ButtonBuilder()
+          .setCustomId('voted_button')
+          .setLabel(`Automatically Voted!`)
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(true);
+
+        const buttons = new ActionRowBuilder<ButtonBuilder>().addComponents(votedButton);
+        if (channel) await channel.send({ embeds: [embed], components: [buttons] });
+      } catch (error) {
+        console.error('Error broadcasting vote operation or adding comment:', error);
+      }
+    } else {
+
+      // Create buttons
+      const voteButton = new ButtonBuilder()
+        .setCustomId(`${author}/${permlink}/${voteValue}`) // Include voteValue in customId
+        .setLabel(' 🚀 VOTE! ')
+        .setStyle(ButtonStyle.Primary);
+    
+      const viewPostButton = new ButtonBuilder()
+        .setLabel('View Post')
+        .setStyle(ButtonStyle.Link)
+        .setURL(postLink);
+
+      const buttons = new ActionRowBuilder<ButtonBuilder>().addComponents(voteButton, viewPostButton);
+      if (channel) await channel.send({ embeds: [embed], components: [buttons] });
     }
+    
   }
 
   return null;
@@ -549,6 +615,9 @@ const discordClient = new DiscordClient({
 
 discordClient.once('ready', async () => {
   console.log(`Logged in as ${discordClient.user?.tag}!`);
+  const channelId = process.env.DISCORD_CHANNEL_ID; // Get channel ID from environment variable 
+  activeChannel = await getActiveChannel(channelId);
+  await streamBlockchain();
   //streamBlockchain();
 });
 
@@ -597,7 +666,7 @@ discordClient.on('messageCreate', async (message) => {
 
   // Check if the user is in the staff list for all other commands
   const isStaff = await isUserInStaffList(message.author.id);
-  if (!isStaff) {
+  if (!isStaff && (message.content === '!help' || message.content.startsWith('!staff') || message.content.startsWith('!unstaff') || message.content.startsWith('!stafflist') || message.content.startsWith('!ban') || message.content.startsWith('!unban') || message.content.startsWith('!blacklist') || message.content.startsWith('!verified') || message.content.startsWith('!verify') || message.content.startsWith('!unverify') || message.content.startsWith('!start') || message.content.startsWith('!stop'))) {
     message.channel.send('```\nYou do not have permission to use this command.\n```');
     return;
   }
@@ -801,9 +870,6 @@ Available Commands:
       message.channel.send('```\nNo users are currently in the staff list.\n```');
     }
   } else if (message.content.startsWith('!test ')) {
-    //const author = message.content.split(' ')[1];
-    //const ranking = await getAuthorDelegationRank(author);
-    //message.reply(ranking ? `User @${author} is ranked #${ranking} among delegators.` : `User @${author} is not ranked.`);
     message.channel.send('```\nThis is a Test.\n```');
   }
 });
@@ -822,53 +888,38 @@ discordClient.on('interactionCreate', async (interaction) => {
 
   if (customId) {
     try {
+      await interaction.deferUpdate(); // 👈 Add this line to prevent "Unknown interaction" errors
+  
       const [author, permlink, voteValue] = customId.split('/');
-      const privateKey = process.env.HIVE_PRIVATE_KEY; // Ensure this is set in your .env file
-      const voter = process.env.HIVE_ACCOUNT; // Ensure this is set in your .env file
-
-      if (!privateKey || !voter) {
-        console.error('HIVE_PRIVATE_KEY or HIVE_ACCOUNT is not set in the environment variables.');
-        await interaction.reply({ content: 'Voting is not configured properly. Please contact the administrator.', flags: 64 });
-        return;
-      }
-
-      const hiveClient = getHiveClient();
+  
       try {
-        await vote(privateKey, voter, author, permlink, voteValue);
-
-        // Generate a random unique string for the permlink
-        // const randomPermlink = `comment-${Math.random().toString(36).substring(2, 15)}`;
-
-        // // Add a comment to the post
-        // await comment(
-        //   privateKey,
-        //   voter, // voter becomes the author of the comment
-        //   randomPermlink,
-        //   author, // parent_author
-        //   permlink, // parent_permlink
-        //   '', // title
-        //   '', // body
-        // );
-
-        // If the vote is successful, update the button to "Voted!"
+        await castVoteAndComment(author, permlink, voteValue);
+  
+        const displayName = interaction.member && 'displayName' in interaction.member
+          ? interaction.member.displayName
+          : user.username;
+  
         const votedButton = new ButtonBuilder()
-          .setCustomId('voted_button') // Set a valid custom_id
-          .setLabel('Voted!')
+          .setCustomId('voted_button')
+          .setLabel(`Voted by @${displayName}`)
           .setStyle(ButtonStyle.Secondary)
           .setDisabled(true);
-
+  
         const actionRow = new ActionRowBuilder<ButtonBuilder>().addComponents(votedButton);
-
-        await interaction.update({ components: [actionRow] }); // Update the message with the disabled button
+  
+        // This is now safe because we deferred the interaction
+        await interaction.editReply({ components: [actionRow] });
       } catch (error) {
         console.error('Error broadcasting vote operation or adding comment:', error);
-        await interaction.reply({ content: 'Failed to cast the vote or add a comment. Please try again later.', flags: 64 });
+        await interaction.followUp({ content: 'Failed to cast the vote or add a comment. Please try again later.', ephemeral: true });
       }
     } catch (error) {
       console.error('Error processing vote button interaction:', error);
-      await interaction.reply({ content: 'Failed to cast the vote. Please try again later.', flags: 64 });
+      if (!interaction.replied && !interaction.deferred) {
+        await interaction.reply({ content: 'Failed to cast the vote. Please try again later.', ephemeral: true });
+      }
     }
-  }
+  }  
 });
 
 discordClient.login(process.env.DISCORD_TOKEN);

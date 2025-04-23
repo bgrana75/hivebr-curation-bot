@@ -1,5 +1,4 @@
 import { Client, CommentOperation, CommentOptionsOperation, Operation, PrivateKey, VoteOperation } from '@hiveio/dhive';
-import { get } from 'http';
 
 const HIVE_NODES = [
     'https://api.hive.blog',
@@ -35,15 +34,6 @@ export async function vote(
   voteValue: string,
 ): Promise<void> {
   try {
-    //console.log("Broadcasting vote operation:", vote);
-    // await client.broadcast.sendOperations([
-    //     ['vote', {
-    //       voter: 'skatedev',
-    //       author: 'richardoswal',
-    //       permlink: 'cartas-rebelion-blackmoor-tricksterrebellion-cards-blackmoor-trickster',
-    //       weight: 3000
-    //     }]
-    //   ], PrivateKey.fromString(privateKey));
     const client = getHiveClient();
     const voteOperation: VoteOperation = [
         'vote',
@@ -76,7 +66,7 @@ export async function comment(
         "comment_options",
         {
             author: String(author),
-            permlink: permlink,
+            permlink: String(permlink),
             max_accepted_payout: "10000.000 HBD",
             percent_hbd: 10000,
             allow_votes: true,
@@ -86,10 +76,10 @@ export async function comment(
                     0,
                     {
                         beneficiaries: [
-                            // {
-                            //     account: "hiveusername",
-                            //     weight: 1000,
-                            // },
+                            {
+                               account: author,
+                               weight: 10000,
+                           },
                         ],
                     },
                 ],
@@ -99,12 +89,12 @@ export async function comment(
     const commentOperation: CommentOperation = [
         "comment",
         {
-            parent_author: parent_author,
-            parent_permlink: parent_permlink,
+            parent_author: String(parent_author),
+            parent_permlink: String(parent_permlink),
             author: String(author),
-            permlink: permlink,
-            title: title,
-            body: body,
+            permlink: String(permlink),
+            title: String(title),
+            body: String(body),
             json_metadata: JSON.stringify({
                 // tags: ["tag"],
                 // app: "appname",
@@ -112,14 +102,16 @@ export async function comment(
             }),
         },
     ];
-
+    //console.log('commentOperation:', commentOperation);
+    //console.log('commentOptions:', commentOptions);
+    
     const ops: Operation[] = [
-        ['comment', commentOperation],
-        ['comment_options', commentOptions]
+        commentOperation,
+        commentOptions
     ];
     try {
         await client.broadcast.sendOperations(ops, PrivateKey.fromString(privateKey));
-        console.log("Vote operation successfully broadcasted");
+        console.log("Comment operation successfully broadcasted");
     } catch (error) {
         console.error("Error broadcasting vote operation:", error);
         throw error;
