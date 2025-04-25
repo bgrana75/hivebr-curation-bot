@@ -228,6 +228,7 @@ async function castVoteAndComment(
   const randomPermlink = `hivebr-${Math.random().toString(36).substring(2, 15)}`;
 
   const body = `
+This post was curated by @hive-br team!
 <center> 
 ![banner_hiver_br_01.png](https://images.ecency.com/DQmcTb42obRrjKQYdtH2ZXjyQb1pn7HNgFgMpTeC6QKtPu4/banner_hiver_br_01.png)
 
@@ -633,11 +634,19 @@ discordClient.on('messageCreate', async (message) => {
       const userInfo = await getUserInfo(userToGet);
       
       if (userInfo) {
+        // Calculate Percentage Delegated
+        const adjustedDelegatedHp = userInfo.delegatedHp - (userInfo.hiveBrVoterDelegation || 0);
+        const adjustedPercentageDelegated = (adjustedDelegatedHp / userInfo.hp) * 100;
+
         const percentageDelegated = (userInfo.delegatedVestingShares / userInfo.vestingShares) * 100;
   
         const keColor = userInfo.ke < 1.5 ? '🟢' : userInfo.ke < 3 ? '🟡' : '🔴';
         const pdColor = userInfo.isPD ? '🔴' : '🟢';
         const percentageDelegatedColor = percentageDelegated < 30 ? '🟢' : percentageDelegated < 60 ? '🟡' : '🔴';
+        const adjustedPercentageDelegatedColor = adjustedPercentageDelegated < 30 ? '🟢' : adjustedPercentageDelegated < 60 ? '🟡' : '🔴';
+
+            // Get author ranking among delegators
+        const authorRank = await getAuthorDelegationRank(userToGet);
   
         const embed = {
           color: 0x0099ff, // Blue color
@@ -648,7 +657,9 @@ discordClient.on('messageCreate', async (message) => {
             { name: 'KE', value: `${userInfo.ke.toFixed(3)} ${keColor}`, inline: false },
             { name: 'Power Down', value: `${userInfo.isPD ? 'Yes' : 'No'} ${pdColor}`, inline: false },
             { name: 'Percentage Delegated', value: `${percentageDelegated.toFixed(2)}% ${percentageDelegatedColor}`, inline: false },
+            { name: 'Percentage Delegated (hive-br.voter discounted)', value: `${adjustedPercentageDelegated.toFixed(2)}% ${adjustedPercentageDelegatedColor}`, inline: false },
             { name: 'Hive-BR Delegation', value: userInfo.hiveBrVoterDelegation ? `${userInfo.hiveBrVoterDelegation.toFixed(3)}` : 'N/A', inline: false },
+            { name: 'Ranking', value: authorRank !== null ? `#${authorRank}` : 'Not Ranked', inline: false },
             { name: 'HBR Stake', value: userInfo.hbrInfo ? userInfo.hbrInfo.stake.toString() : 'N/A', inline: false },
           ],
           footer: { text: `Requested by ${message.author.displayName}`, icon_url: message.author.displayAvatarURL() }
