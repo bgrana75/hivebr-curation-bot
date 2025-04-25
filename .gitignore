@@ -1,2 +1,7 @@
 node_modules/
 .env
+lastBlockHive.txt
+blacklist.json
+staff.json
+trail.json
+users.json
