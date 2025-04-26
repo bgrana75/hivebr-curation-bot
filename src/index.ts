@@ -228,18 +228,17 @@ async function castVoteAndComment(
   const randomPermlink = `hivebr-${Math.random().toString(36).substring(2, 15)}`;
 
   const body = `
-This post was curated by @hive-br team!
-<center> 
-![banner_hiver_br_01.png](https://images.ecency.com/DQmcTb42obRrjKQYdtH2ZXjyQb1pn7HNgFgMpTeC6QKtPu4/banner_hiver_br_01.png)
+<center>This post was curated by @hive-br team!</center>
 
-Delegate your HP to the [hive-br.voter](https://ecency.com/@hive-br.voter/wallet) account and earn Hive daily!
+<center>![banner_hiver_br_01.png](https://images.ecency.com/DQmcTb42obRrjKQYdtH2ZXjyQb1pn7HNgFgMpTeC6QKtPu4/banner_hiver_br_01.png)</center>
+
+<center>Delegate your HP to the [hive-br.voter](https://ecency.com/@hive-br.voter/wallet) account and earn Hive daily!</center>
 
 | | | | | |
 |----|----|----|----|----|
 |<center>[50 HP](https://hivesigner.com/sign/delegateVestingShares?&delegatee=hive-br.voter&vesting_shares=50%20HP)</center>|<center>[100 HP](https://hivesigner.com/sign/delegateVestingShares?&delegatee=hive-br.voter&vesting_shares=100%20HP)</center>|<center>[200 HP](https://hivesigner.com/sign/delegateVestingShares?&delegatee=hive-br.voter&vesting_shares=200%20HP)</center>|<center>[500 HP](https://hivesigner.com/sign/delegateVestingShares?&delegatee=hive-br.voter&vesting_shares=500%20HP)</center>|<center>[1000 HP](https://hivesigner.com/sign/delegateVestingShares?&delegatee=hive-br.voter&vesting_shares=1000%20HP)</center>|
 
-🔹 Follow our [Curation Trail](https://hive.vote/dash.php?i=1&trail=hive-br.voter) and don't miss voting! 🔹
-</center>
+<center>🔹 Follow our [Curation Trail](https://hive.vote/dash.php?i=1&trail=hive-br.voter) and don't miss voting! 🔹</center>
 `;
 
 
