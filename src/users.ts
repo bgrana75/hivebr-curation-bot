@@ -7,6 +7,7 @@ const writeFile = promisify(fs.writeFile);
 const USERS_FILE = './users.json';
 const BLACKLIST_FILE = './blacklist.json';
 const STAFF_FILE = './staff.json';
+const AUTO_FILE = './auto.json';
 
 export const getStaffUsers = async (): Promise<{ hiveUsername: string; discordId: string }[]> => {
     try {
@@ -67,6 +68,24 @@ export const saveBlacklistedUsers = async (users: string[]): Promise<void> => {
     await writeFile(BLACKLIST_FILE, JSON.stringify(users, null, 2));
   } catch (error) {
     console.error(`Could not write users to ${BLACKLIST_FILE}:`, (error as Error).message);
+  }
+};
+
+export const getAutoUsers = async (): Promise<string[]> => {
+  try {
+    const data = await readFile(AUTO_FILE, 'utf-8');
+    return JSON.parse(data);
+  } catch (error) {
+    console.error(`Could not read users from ${AUTO_FILE}:`, (error as Error).message);
+    return [];
+  }
+};
+
+export const saveAutoUsers = async (users: string[]): Promise<void> => {
+  try {
+    await writeFile(AUTO_FILE, JSON.stringify(users, null, 2));
+  } catch (error) {
+    console.error(`Could not write users to ${AUTO_FILE}:`, (error as Error).message);
   }
 };
 

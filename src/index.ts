@@ -2,7 +2,7 @@ import { config } from 'dotenv';
 import { Client as DiscordClient, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, TextChannel, Channel } from 'discord.js';
 import { getNextHiveClient, getHiveClient } from './hive/index';
 import { convertVestToHive, extractNumber } from './hive/util';
-import { getBlacklistedUsers, getVerifiedUsers, saveVerifiedUsers, getStaffUsers, getLastProcessedBlock, updateLastProcessedBlock, saveBlacklistedUsers, saveStaffUsers, isUserInStaffList } from './users';
+import { getBlacklistedUsers, getVerifiedUsers, saveVerifiedUsers, getStaffUsers, getLastProcessedBlock, updateLastProcessedBlock, saveBlacklistedUsers, saveStaffUsers, isUserInStaffList, getAutoUsers, saveAutoUsers } from './users';
 import { checkHivewatchers, checkHiveVoteTrail } from './services/api';
 import { getAuthorDelegationRank } from './hive/haf';
 import { hiveEngineApi } from './hive_engine';
@@ -274,6 +274,28 @@ const processPost = async (post: any, timestamp: string) => {
     console.error('Error parsing json_metadata:', error);
   }
 
+  // Check if the user is on the blacklist
+  const blacklistedUsers = await getBlacklistedUsers();
+  if (blacklistedUsers.includes(author)) {
+    console.error(`Skipping post <${postLnk}> by blacklisted user @${author}`);
+    const channel = await getActiveChannel();
+    if (channel) {
+      await channel.send(`Skipping post <${postLnk}> by @${author}: User is blacklisted.`);
+    }
+    return;
+  }
+
+  // Check if the user is on the Hivewatchers list
+  const hivewatchersList = await checkHivewatchers();
+  if (hivewatchersList.includes(author)) {
+    console.error(`Skipping post <${postLnk}> by user @${author} flagged by Hivewatchers.`);
+    const channel = await getActiveChannel();
+    if (channel) {
+      await channel.send(`Skipping post <${postLnk}> by @${author}: User is flagged by Hivewatchers.`);
+    }
+    return;
+  }
+
   const postInfo = await getPostInfo(author, permlink);
   if (!postInfo) {
     console.error(`Failed to fetch post info for @${author}/${permlink}`);
@@ -288,35 +310,11 @@ const processPost = async (post: any, timestamp: string) => {
   const providedTimestamp = new Date(timestamp).getTime();
   console.log(`Post created time: ${postCreatedTime}, Provided timestamp: ${providedTimestamp}`);
   // Allow up to 5 seconds difference
-  if (providedTimestamp < postCreatedTime || providedTimestamp > postCreatedTime + 5000) {
-    console.error(`Post @${author}/${permlink} was created outside the allowed timestamp range. Skipping.`);
+  if (providedTimestamp < postCreatedTime || providedTimestamp > postCreatedTime + 6000) {
+    console.log(`Post @${author}/${permlink} was created outside the allowed timestamp range. Skipping.`);
     // if (activeChannel) {
     //   await activeChannel.send(`Skipping post <${postLnk}> by @${author}: This is a post edit, not a new post.`);
     // }
-    return;
-  }
-
-  // Check if the user is on the blacklist or Hivewatchers list
-  const blacklistedUsers = await getBlacklistedUsers();
-  const hivewatchersList = await checkHivewatchers();
-  if (blacklistedUsers.includes(author) || hivewatchersList.includes(author)) {
-    console.error(`Skipping post by blacklisted user @${author}`);
-    const channel = await getActiveChannel();
-    if (channel) {
-      await channel.send(`Skipping post <${postLnk}> by @${author}: User is blacklisted.`);
-    }
-    return;
-  }
-
-  // Check if the author was already voted on the same day
-  const referenceDate = new Date(timestamp + 'Z');
-  const alreadyVoted = await checkSameDayVote(author, permlink, referenceDate);
-  if (alreadyVoted) {
-    console.error(`Skipping post by @${author} because they were already voted on the same day.`);
-    const channel = await getActiveChannel();
-    if (channel) {
-      await channel.send(`Skipping post <${postLnk}> by @${author}: Already voted on the same day.`);
-    }
     return;
   }
 
@@ -482,7 +480,11 @@ const processPost = async (post: any, timestamp: string) => {
 
     const channel = await getActiveChannel();
 
-    if (isVerified) {
+    // Check if the user is verified
+    const autoUsers = await getAutoUsers();
+    const isAuto = autoUsers.includes(author);
+
+    if (isAuto) {
       try {
         await castVoteAndComment(author, permlink, String(voteValue));
 
@@ -494,26 +496,23 @@ const processPost = async (post: any, timestamp: string) => {
 
         const buttons = new ActionRowBuilder<ButtonBuilder>().addComponents(votedButton);
         if (channel) await channel.send({ embeds: [embed], components: [buttons] });
+        return null
       } catch (error) {
         console.error('Error broadcasting vote operation or adding comment:', error);
       }
-    } else {
-
-      // Create buttons
-      const voteButton = new ButtonBuilder()
-        .setCustomId(`${author}/${permlink}/${voteValue}`) // Include voteValue in customId
-        .setLabel(' 🚀 VOTE! ')
-        .setStyle(ButtonStyle.Primary);
-    
-      const viewPostButton = new ButtonBuilder()
-        .setLabel('View Post')
-        .setStyle(ButtonStyle.Link)
-        .setURL(postLink);
-
-      const buttons = new ActionRowBuilder<ButtonBuilder>().addComponents(voteButton, viewPostButton);
-      if (channel) await channel.send({ embeds: [embed], components: [buttons] });
-    }
-    
+    } 
+    // Create buttons
+    const voteButton = new ButtonBuilder()
+      .setCustomId(`${author}/${permlink}/${voteValue}`) // Include voteValue in customId
+      .setLabel(' 🚀 VOTE! ')
+      .setStyle(ButtonStyle.Primary);
+  
+    const viewPostButton = new ButtonBuilder()
+      .setLabel('View Post')
+      .setStyle(ButtonStyle.Link)
+      .setURL(postLink);
+    const buttons = new ActionRowBuilder<ButtonBuilder>().addComponents(voteButton, viewPostButton);
+    if (channel) await channel.send({ embeds: [embed], components: [buttons] });
   }
 
   return null;
@@ -532,17 +531,12 @@ async function processBlock(block: any): Promise<void> {
       try {
         const metadata = JSON.parse(json_metadata);
         if (Array.isArray(metadata.tags) && (metadata.tags.includes('hivebr') || metadata.tags.includes('hive-br'))) {
-          const blacklistedUsers = await getBlacklistedUsers();
-          if (!blacklistedUsers.includes(author)) {
             const result = await processPost(postData, block.timestamp);
 
             // if (result && activeChannel) {
             //   const { embed, buttons } = result;
             //   await activeChannel.send({ embeds: [embed], components: [buttons] });
             // }
-          } else {
-            console.log(`Author @${author} is blacklisted. Skipping post.`);
-          }
         }
       } catch (error) {
         console.error('Error parsing json_metadata or checking tags:', error);
@@ -720,7 +714,16 @@ Available Commands:
 11. !stafflist
     - Lists all users in the staff list.
 
-12. !userinfo <username>
+12. !autoadd <username>
+    - Adds a user to the autoadd list.
+
+13. !autorm <username>
+    - Removes a user from the autoadd list.
+
+14. !autolist
+    - Lists all users in the autoadd list.
+
+15. !userinfo <username>
    - Displays detailed information about a user's Hive account.
 
 \`\`\`
@@ -761,6 +764,47 @@ Available Commands:
     }
   } else if (message.content === '!verified') {
     const users = await getVerifiedUsers();
+    if (users.length > 0) {
+      const userList = users.sort().map(user => `- @${user}`).join('\n');
+      message.channel.send(`\`\`\`**Verified Users:**\n${userList}\`\`\``);
+    } else {
+      message.channel.send('```\nNo users are currently verified.\n```');
+    }
+  } else if (message.content.startsWith('!autoadd ')) {
+    const userToAdd = message.content.split(' ')[1];
+    if (userToAdd) {
+      const blacklistedUsers = await getBlacklistedUsers();
+      if (blacklistedUsers.includes(userToAdd)) {
+        message.channel.send(`\`\`\`User @${userToAdd} is currently blacklisted. Please remove them from the blacklist first using !unban @${userToAdd}.\`\`\``);
+        return;
+      }
+      const users = await getAutoUsers();
+      if (!users.includes(userToAdd)) {
+        users.push(userToAdd);
+        await saveAutoUsers(users);
+        message.channel.send(`\`\`\`User @${userToAdd} added to verified list.\`\`\``);
+      } else {
+        message.channel.send(`\`\`\`User @${userToAdd} is already in the verified list.\`\`\``);
+      }
+    } else {
+      message.channel.send('```\nPlease specify a user to add.\n```');
+    }
+  } else if (message.content.startsWith('!autorm ')) {
+    const userToDelete = message.content.split(' ')[1];
+    if (userToDelete) {
+      let users = await getAutoUsers();
+      if (users.includes(userToDelete)) {
+        users = users.filter(user => user !== userToDelete);
+        await saveAutoUsers(users);
+        message.channel.send(`\`\`\`User @${userToDelete} removed from verified list.\`\`\``);
+      } else {
+        message.channel.send(`\`\`\`User @${userToDelete} is not in the verified list.\`\`\``);
+      }
+    } else {
+      message.channel.send('```\nPlease specify a user to delete.\n```');
+    }
+  } else if (message.content === '!autolist') {
+    const users = await getAutoUsers();
     if (users.length > 0) {
       const userList = users.sort().map(user => `- @${user}`).join('\n');
       message.channel.send(`\`\`\`**Verified Users:**\n${userList}\`\`\``);
@@ -933,3 +977,5 @@ discordClient.on('interactionCreate', async (interaction) => {
 });
 
 discordClient.login(process.env.DISCORD_TOKEN);
+
+
