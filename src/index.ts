@@ -782,9 +782,9 @@ Available Commands:
       if (!users.includes(userToAdd)) {
         users.push(userToAdd);
         await saveAutoUsers(users);
-        message.channel.send(`\`\`\`User @${userToAdd} added to verified list.\`\`\``);
+        message.channel.send(`\`\`\`User @${userToAdd} added to Auto list.\`\`\``);
       } else {
-        message.channel.send(`\`\`\`User @${userToAdd} is already in the verified list.\`\`\``);
+        message.channel.send(`\`\`\`User @${userToAdd} is already in the Auto list.\`\`\``);
       }
     } else {
       message.channel.send('```\nPlease specify a user to add.\n```');
@@ -796,9 +796,9 @@ Available Commands:
       if (users.includes(userToDelete)) {
         users = users.filter(user => user !== userToDelete);
         await saveAutoUsers(users);
-        message.channel.send(`\`\`\`User @${userToDelete} removed from verified list.\`\`\``);
+        message.channel.send(`\`\`\`User @${userToDelete} removed from Auto list.\`\`\``);
       } else {
-        message.channel.send(`\`\`\`User @${userToDelete} is not in the verified list.\`\`\``);
+        message.channel.send(`\`\`\`User @${userToDelete} is not in the Auto list.\`\`\``);
       }
     } else {
       message.channel.send('```\nPlease specify a user to delete.\n```');
@@ -807,7 +807,7 @@ Available Commands:
     const users = await getAutoUsers();
     if (users.length > 0) {
       const userList = users.sort().map(user => `- @${user}`).join('\n');
-      message.channel.send(`\`\`\`**Verified Users:**\n${userList}\`\`\``);
+      message.channel.send(`\`\`\`**Auto Vote Users:**\n${userList}\`\`\``);
     } else {
       message.channel.send('```\nNo users are currently verified.\n```');
     }
