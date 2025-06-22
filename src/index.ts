@@ -733,6 +733,12 @@ Available Commands:
 15. !userinfo <username>
    - Displays detailed information about a user's Hive account.
 
+16. !vp
+   - Display voting power
+
+17. !vote <username>/<permlink> <votevalue>
+   - Make a manual vote overwriting user score
+
 \`\`\`
     `;
     message.channel.send(helpMessage);
