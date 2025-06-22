@@ -14,3 +14,20 @@ export function extractNumber(value: string): number {
   const match = value.match(/([\d.]+)/);
   return match ? parseFloat(match[0]) : 0;
 }
+
+export async function getVotingPower(accountName: string) {
+  try {
+    const hiveClient = getHiveClient();
+    const accounts = await hiveClient.database.getAccounts([accountName]);
+    if (accounts && accounts.length > 0) {
+      const account = accounts[0];
+      const votingPower = account.voting_power / 100; // Convert to percentage
+      //console.log(`Voting power for ${accountName}: ${votingPower}%`);
+      return votingPower;
+    } else {
+      console.log(`VP not available. Account not found: ${accountName}`);
+    }
+  } catch (error) {
+    console.error('Error fetching voting power:', error);
+  }
+}

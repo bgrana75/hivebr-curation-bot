@@ -1,12 +1,13 @@
 import { config } from 'dotenv';
 import { Client as DiscordClient, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, TextChannel, Channel } from 'discord.js';
 import { getNextHiveClient, getHiveClient } from './hive/index';
-import { convertVestToHive, extractNumber } from './hive/util';
+import { convertVestToHive, extractNumber, getVotingPower } from './hive/util';
 import { getBlacklistedUsers, getVerifiedUsers, saveVerifiedUsers, getStaffUsers, getLastProcessedBlock, updateLastProcessedBlock, saveBlacklistedUsers, saveStaffUsers, isUserInStaffList, getAutoUsers, saveAutoUsers } from './users';
 import { checkHivewatchers, checkHiveVoteTrail } from './services/api';
 import { getAuthorDelegationRank } from './hive/haf';
 import { hiveEngineApi } from './hive_engine';
 import { vote, comment } from './hive/index';
+import { getUserCsiScore } from './hive/csi';
 
 config(); // Load .env variables
 
@@ -280,7 +281,7 @@ const processPost = async (post: any, timestamp: string) => {
     console.error(`Skipping post <${postLnk}> by blacklisted user @${author}`);
     const channel = await getActiveChannel();
     if (channel) {
-      await channel.send(`Skipping post <${postLnk}> by @${author}: User is blacklisted.`);
+      // await channel.send(`Skipping post <${postLnk}> by @${author}: User is blacklisted.`);
     }
     return;
   }
@@ -328,9 +329,9 @@ const processPost = async (post: any, timestamp: string) => {
 
     // Calculate voteValue based on KE
     let kePoints = 0;
-    if (userInfo.ke < 1.5) {
+    if (userInfo.ke < 2) {
       kePoints = 10;
-    } else if (userInfo.ke >= 1.5 && userInfo.ke < 3) {
+    } else if (userInfo.ke >= 2 && userInfo.ke < 3) {
       kePoints = 5;
     }
     voteValue += kePoints;
@@ -383,7 +384,7 @@ const processPost = async (post: any, timestamp: string) => {
     let verifiedPoints = 0;
     const isVerified = verifiedUsers.includes(author);
     if (isVerified) {
-      verifiedPoints = 10;
+      verifiedPoints = 15;
       voteValue += verifiedPoints;
     }
 
@@ -530,7 +531,10 @@ async function processBlock(block: any): Promise<void> {
 
       try {
         const metadata = JSON.parse(json_metadata);
-        if (Array.isArray(metadata.tags) && (metadata.tags.includes('hivebr') || metadata.tags.includes('hive-br'))) {
+        if (
+          Array.isArray(metadata.tags) &&
+          (metadata.tags as string[]).map((tag) => tag.toLowerCase()).some(tag => tag === 'hivebr' || tag === 'hive-br')
+        ) {         
             const result = await processPost(postData, block.timestamp);
 
             // if (result && activeChannel) {
@@ -640,6 +644,8 @@ discordClient.on('messageCreate', async (message) => {
 
             // Get author ranking among delegators
         const authorRank = await getAuthorDelegationRank(userToGet);
+
+        const csi = await getUserCsiScore(userToGet);
   
         const embed = {
           color: 0x0099ff, // Blue color
@@ -648,6 +654,7 @@ discordClient.on('messageCreate', async (message) => {
           fields: [
             { name: 'HP', value: `${userInfo.hp.toFixed(3)}`, inline: false },
             { name: 'KE', value: `${userInfo.ke.toFixed(3)} ${keColor}`, inline: false },
+            { name: 'CSI (30 dias)', value: `${csi?.csi.toFixed(3)}`, inline: false },
             { name: 'Power Down', value: `${userInfo.isPD ? 'Yes' : 'No'} ${pdColor}`, inline: false },
             { name: 'Percentage Delegated', value: `${percentageDelegated.toFixed(2)}% ${percentageDelegatedColor}`, inline: false },
             { name: 'Percentage Delegated (hive-br.voter discounted)', value: `${adjustedPercentageDelegated.toFixed(2)}% ${adjustedPercentageDelegatedColor}`, inline: false },
@@ -729,6 +736,50 @@ Available Commands:
 \`\`\`
     `;
     message.channel.send(helpMessage);
+  } else if (message.content.startsWith('!vp')) {
+    const vp = await getVotingPower('hive-br.voter');
+    message.channel.send(`\`\`\`Current VP: ${vp}%\`\`\``)
+  } else if (message.content.startsWith('!vote ')) {
+    const messageContent = message.content.trim(); // raw message from Discord
+    const args = messageContent.split(' ');
+
+    if (args.length !== 3 || !args[1].includes('/')) {
+      message.channel.send('Invalid format. Usage: `!vote author/permlink votevalue`');
+      return;
+    }
+
+    let [author, permlink] = args[1].split('/');
+    author = author.replace('@', '');
+    const voteValue = parseFloat(args[2]);
+
+    if (!author || !permlink || isNaN(voteValue)) {
+      message.channel.send('Invalid arguments. Please provide a valid author/permlink and numeric vote value.');
+      return;
+    }
+    //console.log({ author, permlink, voteValue });
+    try {
+      castVoteAndComment(author, permlink, String(voteValue));
+
+      const postLink = `https://peakd.com/@${author}/${permlink}`;
+      const displayName = message.member?.displayName || message.author.username;
+      // Create embed
+      const embed = new EmbedBuilder()
+        .setColor(0x0099ff) // Blue color
+        .setAuthor({ name: `@${author}`, iconURL: `https://images.hive.blog/u/${author}/avatar`, url: `https://peakd.com/@${author}` })
+        .setTitle(`**VOTO MANUAL**`) 
+        .setURL(postLink);
+
+      embed.addFields(
+        { name: '**Link:**', value: `${postLink}`, inline: false},
+        { name: '**Valor do Voto:**', value: `${voteValue}`, inline: false },
+        { name: '**Votado por:**', value: `${displayName}`, inline: false },
+      );
+      await message.channel.send({ embeds: [embed] });
+    } catch {
+      console.log('error');
+    }
+
+
   } else if (message.content.startsWith('!verify ')) {
     const userToAdd = message.content.split(' ')[1];
     if (userToAdd) {
