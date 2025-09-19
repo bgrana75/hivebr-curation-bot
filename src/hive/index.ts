@@ -60,6 +60,8 @@ export async function comment(
     parent_permlink: string,
     title: string,
     body: string,
+    //alterado shiftrox 18/09/2025
+    beneficiary : string
   ) {
     const client = getHiveClient();
     const commentOptions: CommentOptionsOperation = [
@@ -71,13 +73,14 @@ export async function comment(
             percent_hbd: 10000,
             allow_votes: true,
             allow_curation_rewards: true,
+            beneficiary: "hive-br", //alterado shiftrox 18/09/2025
             extensions: [
                 [
                     0,
                     {
                         beneficiaries: [
                             {
-                               account: author,
+                               account: beneficiary, //alterado shiftrox 18/09/2025
                                weight: 10000,
                            },
                         ],

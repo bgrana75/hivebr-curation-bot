@@ -233,7 +233,7 @@ async function castVoteAndComment(
 
 <center>![banner_hiver_br_01.png](https://images.ecency.com/DQmcTb42obRrjKQYdtH2ZXjyQb1pn7HNgFgMpTeC6QKtPu4/banner_hiver_br_01.png)</center>
 
-<center>Delegate your HP to the [hive-br.voter](https://ecency.com/@hive-br.voter/wallet) account and earn Hive daily!</center>
+<center>Delegate your HP to the [hive-br.voter](https://peakd.com/@hive-br.voter/wallet) account and earn Hive daily!</center>
 
 | | | | | |
 |----|----|----|----|----|
