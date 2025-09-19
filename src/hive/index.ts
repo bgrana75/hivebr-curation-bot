@@ -77,7 +77,7 @@ export async function comment(
                     {
                         beneficiaries: [
                             {
-                               account: author,
+                               account: "hive-br", //alterado shiftrox 18/09/2025
                                weight: 10000,
                            },
                         ],
