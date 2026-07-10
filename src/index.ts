@@ -319,6 +319,18 @@ const processPost = async (post: any, timestamp: string) => {
     return;
   }
 
+  // Check if the author was already voted on the same day
+  const referenceDate = new Date(timestamp + 'Z');
+  const alreadyVoted = await checkSameDayVote(author, permlink, referenceDate);
+  if (alreadyVoted) {
+    console.error(`Skipping post <${postLnk}> by @${author} because they were already voted on the same day.`);
+    const channel = await getActiveChannel();
+    if (channel) {
+      await channel.send(`Skipping post <${postLnk}> by @${author}: Already voted on the same day.`);
+    }
+    return;
+  }
+
   const { category, title, body, beneficiaries, isDeclining } = postInfo;
   const userInfo = await getUserInfo(author);
   const postLink = `https://peakd.com/@${author}/${permlink}`;
